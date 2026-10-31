@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds NectarLink Desktop for Linux x86_64 (amd64) and publishes the .deb
+# and the portable tarball as a GitHub release, so they can be downloaded
+# without building anything locally.
+#
+# Upstream only ships Windows and Android; this fork's workflow fills the
+# Linux gap. It mirrors the `linux` job of release.yml (same Qt version, same
+# system packages, same packaging scripts) and adds a release step.
+name: Linux amd64 package
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "desktop/**"
+      - "assets/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/linux-amd64.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  QT_VERSION: "6.12.0"
+  # One tag, rebuilt in place: the download URL never changes.
+  RELEASE_TAG: linux-amd64
+
+jobs:
+  build:
+    name: Build .deb (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgl1-mesa-dev libx11-dev libxcb1-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev \
+            libfreetype-dev libdbus-1-dev libxtst-dev libavcodec-dev libavutil-dev \
+            libvulkan-dev file desktop-file-utils appstream
+          pkg-config --exists libavcodec libavutil
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: qtshadertools qtwaylandcompositor
+          cache: true
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-amd64
+
+      - name: Cache FFmpeg source archives
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-sources
+          key: ffmpeg-sources-${{ hashFiles('desktop/packaging/linux/build-ffmpeg-backends.sh') }}
+
+      - name: Build the release binary
+        run: |
+          echo "Qt: $QT_ROOT_DIR"
+          "$QT_ROOT_DIR/bin/qmake" -query QT_VERSION
+          cargo build --locked --release -p nectarlink-desktop
+
+      - name: Build the FFmpeg ABI adapters
+        env:
+          FFMPEG_SOURCE_CACHE: ${{ runner.temp }}/ffmpeg-sources
+        run: bash ./desktop/packaging/linux/build-ffmpeg-backends.sh
+
+      - name: Package (.deb and tarball)
+        run: |
+          ./desktop/packaging/linux/build-deb.sh
+          ./desktop/packaging/linux/build-tarball.sh
+          ls -lh dist/
+
+      - name: Check that the .deb starts
+        # A package that doesn't start must not be published. The .deb goes
+        # into a clean Ubuntu 24.04, the oldest system the build supports.
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" ubuntu:24.04 bash -euc '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends /dist/*.deb >/dev/null
+            nectarlink-desktop --version'
+
+      - name: Check the tarball starts
+        run: |
+          mkdir -p /tmp/tarball && tar -xzf dist/*.tar.gz -C /tmp/tarball
+          /tmp/tarball/*/nectarlink-desktop --version
+
+      - name: Give the assets stable names
+        # The version is in the .deb's own metadata; a fixed file name keeps
+        # the download URL the same across rebuilds.
+        run: |
+          cd dist
+          cp nectarlink_*_amd64.deb nectarlink-linux-amd64.deb
+          cp Nectarlink-*-linux-*.tar.gz nectarlink-linux-amd64.tar.gz
+          sha256sum nectarlink-linux-amd64.deb nectarlink-linux-amd64.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$RELEASE_TAG" --cleanup-tag --yes || true
+          gh release create "$RELEASE_TAG" \
+            --title "NectarLink for Linux (x86_64)" \
+            --notes "Built from \`${{ github.sha }}\` by [this workflow](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+
+          **Install (.deb, Ubuntu 24.04+ / Debian 13 / any apt system):**
+
+          \`\`\`sh
+          curl -fLO https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/nectarlink-linux-amd64.deb
+          sudo apt install ./nectarlink-linux-amd64.deb
+          \`\`\`
+
+          **Portable tarball** (unpack anywhere, run \`./nectarlink-desktop\`):
+
+          \`\`\`sh
+          curl -fLO https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/nectarlink-linux-amd64.tar.gz
+          tar -xzf nectarlink-linux-amd64.tar.gz && cd Nectarlink-*/
+          ./nectarlink-desktop
+          \`\`\`
+
+          Verify either one with \`sha256sum -c SHA256SUMS.txt\`." \
+            dist/nectarlink-linux-amd64.deb dist/nectarlink-linux-amd64.tar.gz dist/SHA256SUMS.txt
