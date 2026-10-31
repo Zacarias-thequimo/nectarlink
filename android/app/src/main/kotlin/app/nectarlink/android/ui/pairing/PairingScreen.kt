@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package app.nectarlink.android.ui.pairing
 
+import android.content.ClipboardManager
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -22,11 +23,14 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,10 +44,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -69,11 +76,20 @@ interface PairingActions {
     suspend fun showCode(): String?
 }
 
+/** What the pairing screen is showing while nothing is in progress. */
+private data class PairingMode(
+    val pairing: PairingState,
+    val nearby: Boolean,
+    val showing: Boolean,
+    val pasting: Boolean,
+)
+
 /**
- * Pairing with a PC: scan the QR code it shows, or pick it from the PCs
- * nearby and compare a 6-digit code. Pairing with another phone or tablet:
- * one shows a code ("Show a code") and the other scans it. `onDone` runs
- * after success (or when the user backs out, if `cancellable`).
+ * Pairing with a PC: scan the QR code it shows, paste the link under it, or
+ * pick the PC from the ones nearby and compare a 6-digit code. Pairing with
+ * another phone or tablet: one shows a code ("Show a code") and the other
+ * scans it. `onDone` runs after success (or when the user backs out, if
+ * `cancellable`).
  */
 @Composable
 fun PairingScreen(
@@ -84,6 +100,7 @@ fun PairingScreen(
 ) {
     var nearby by rememberSaveable { mutableStateOf(false) }
     var showing by rememberSaveable { mutableStateOf(false) }
+    var pasting by rememberSaveable { mutableStateOf(false) }
     val pairing = state.pairing
     val reducedMotion = LocalReducedMotion.current
     DisposableEffect(Unit) {
@@ -112,6 +129,7 @@ fun PairingScreen(
                 else -> when {
                     showing -> stringResource(R.string.pair_show_title)
                     nearby -> stringResource(R.string.pair_nearby_title)
+                    pasting -> stringResource(R.string.pair_paste_title)
                     else -> stringResource(R.string.pair_title)
                 }
             },
@@ -121,7 +139,7 @@ fun PairingScreen(
         Spacer(Modifier.height(20.dp))
 
         AnimatedContent(
-            targetState = Triple(pairing, nearby, showing),
+            targetState = PairingMode(pairing, nearby, showing, pasting),
             transitionSpec = {
                 if (reducedMotion) {
                     EnterTransition.None togetherWith ExitTransition.None
@@ -131,11 +149,12 @@ fun PairingScreen(
             },
             modifier = Modifier.weight(1f),
             label = "pairing",
-        ) { (current, showNearby, showCode) ->
+        ) { (current, showNearby, showCode, showPaste) ->
             when (current) {
                 PairingState.Idle -> when {
                     showCode -> ShowCode(actions)
                     showNearby -> NearbyList(state.discovered, actions::pairNearby)
+                    showPaste -> PasteLink(actions::join)
                     else -> Scan(actions::join)
                 }
                 PairingState.Joining -> Working(stringResource(R.string.pair_joining))
@@ -158,13 +177,17 @@ fun PairingScreen(
 
         if (pairing == PairingState.Idle) {
             if (!showing) {
-                FilledTonalButton(onClick = { nearby = !nearby }) {
+                FilledTonalButton(onClick = { nearby = !nearby; pasting = false }) {
                     Text(stringResource(if (nearby) R.string.action_scan_instead else R.string.action_pair_nearby))
+                }
+                TextButton(onClick = { pasting = !pasting; nearby = false }) {
+                    Text(stringResource(if (pasting) R.string.action_scan_instead else R.string.action_paste_link))
                 }
             }
             TextButton(onClick = {
                 showing = !showing
                 nearby = false
+                pasting = false
             }) {
                 Text(stringResource(if (showing) R.string.action_scan_instead else R.string.action_show_code))
             }
@@ -260,6 +283,62 @@ private fun Scan(onLink: (String) -> Unit) {
                 .clip(MaterialTheme.shapes.extraLarge)
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh),
         )
+    }
+}
+
+/**
+ * Pairing by pasting the link the PC shows under its QR code. The camera
+ * can't read a code across a hotspot the phone itself is running, and a
+ * pasted link needs no discovery at all.
+ */
+@Composable
+private fun PasteLink(onLink: (String) -> Unit) {
+    var text by rememberSaveable { mutableStateOf("") }
+    val context = LocalContext.current
+    val trimmed = text.trim()
+    val looksLikeLink = trimmed.startsWith("nectarlink://")
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            stringResource(R.string.pair_paste_hint),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(16.dp))
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text(stringResource(R.string.pair_paste_label)) },
+            placeholder = { Text("nectarlink://pair?v=0&…") },
+            minLines = 3,
+            maxLines = 6,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { if (looksLikeLink) onLink(trimmed) }),
+            trailingIcon = {
+                TextButton(onClick = {
+                    // primaryClip is null when the clipboard is empty, and the
+                    // clip may hold no items at all.
+                    val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip
+                    val item = if ((clip?.itemCount ?: 0) > 0) clip?.getItemAt(0) else null
+                    item?.coerceToText(context)?.toString()?.let { text = it.trim() }
+                }) {
+                    Text(stringResource(R.string.action_paste))
+                }
+            },
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { onLink(trimmed) },
+            enabled = looksLikeLink,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(stringResource(R.string.action_pair))
+        }
     }
 }
 

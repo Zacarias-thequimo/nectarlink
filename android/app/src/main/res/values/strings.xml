@@ -10,6 +10,11 @@
     <string name="pair_show_qr_desc">Pairing code for another phone or tablet</string>
     <string name="action_show_code">Pair a phone or tablet instead</string>
     <string name="pair_scan_hint">On your PC, open NectarLink. Point the camera at the code it shows. Another phone or tablet shows its code under Pair a phone or tablet.</string>
+    <string name="pair_paste_title">Paste the link</string>
+    <string name="pair_paste_hint">On your PC, open NectarLink and copy the link under its QR code. Paste it here. Use this when the camera can\'t read the code, or when this phone is the hotspot.</string>
+    <string name="pair_paste_label">Pairing link</string>
+    <string name="action_paste">Paste</string>
+    <string name="action_paste_link">Paste a link instead</string>
     <string name="pair_nearby_title">Pair nearby</string>
     <string name="pair_nearby_hint">On your PC, open NectarLink and keep its pairing screen open. It shows up here.</string>
     <string name="pair_looking">Looking for PCs…</string>

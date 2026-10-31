@@ -55,6 +55,11 @@ pub mod qobject {
         /// Shows a QR code (and accepts nearby pairing) until cancelled.
         #[qinvokable]
         fn start(self: Pin<&mut Pairing>);
+        /// The link behind the QR code, so it can be copied to the phone
+        /// when the camera can't read the code (e.g. the phone is the
+        /// hotspot and can't scan its own screen). Empty when not hosting.
+        #[qinvokable]
+        fn link(self: &Pairing) -> QString;
         /// Pairs with a nearby device that shows its pairing screen.
         #[qinvokable]
         fn pair_nearby(self: Pin<&mut Pairing>, device: &QString);
@@ -216,6 +221,13 @@ impl qobject::Pairing {
 
     pub fn start(self: Pin<&mut Self>) {
         host_qr();
+    }
+
+    pub fn link(&self) -> QString {
+        hub().read(|s| match &s.pairing {
+            PairingView::Hosting { uri, .. } => QString::from(uri.as_str()),
+            _ => QString::default(),
+        })
     }
 
     pub fn pair_nearby(self: Pin<&mut Self>, device: &QString) {

@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Builds the Android app and publishes the APK as a GitHub release, so it can
+# be installed without building anything locally.
+#
+# Upstream's release workflow requires the project's signing key (and refuses
+# to run without it). This fork has no key, so the APK is signed with the
+# standard Android debug key instead: installable on any phone that allows
+# sideloading, but not upgradeable over an upstream-signed install (uninstall
+# the old one first) and not publishable to Play.
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "android/**"
+      - "assets/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/android-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # One tag, rebuilt in place: the download URL never changes.
+  RELEASE_TAG: android-apk
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned Rust toolchain and the Android targets
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+
+      - name: Install cargo-ndk
+        # The same install upstream's release job uses.
+        run: cargo install --locked cargo-ndk
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: "16111833"
+          packages: "platforms;android-37.0 ndk;30.0.16248370 build-tools;37.0.0"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Build the release APK
+        working-directory: android
+        # Phones: 64-bit ARM, and 32-bit ARM for older ones. No keystore is
+        # set, so Gradle signs with the debug key (see the header).
+        run: ./gradlew --no-daemon assembleRelease -Pnectarlink.abis=arm64-v8a,armeabi-v7a
+
+      - name: Check the APK
+        run: |
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          test -f "$apk"
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "$apk"
+          mkdir -p out
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          # A fixed name keeps the download URL stable across rebuilds.
+          cp "$apk" out/nectarlink-android.apk
+          printf '%s\n' "$version" > out/VERSION
+
+      - name: Write the checksum
+        run: |
+          cd out
+          sha256sum nectarlink-android.apk > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$RELEASE_TAG" --cleanup-tag --yes || true
+          gh release create "$RELEASE_TAG" \
+            --title "NectarLink for Android (unsigned release)" \
+            --notes "Built from \`${{ github.sha }}\` by [this workflow](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+
+          **Install:** download \`nectarlink-android.apk\` below and open it on the phone (allow installing from this source when asked). Or:
+
+          \`\`\`sh
+          curl -fLO https://github.com/${{ github.repository }}/releases/download/$RELEASE_TAG/nectarlink-android.apk
+          \`\`\`
+
+          Verify with \`sha256sum -c SHA256SUMS.txt\`.
+
+          This APK is signed with the Android **debug** key, not the project's release key. It installs fine, but if the official NectarLink is already on the phone, uninstall it first (the signatures differ)." \
+            out/nectarlink-android.apk out/SHA256SUMS.txt out/VERSION

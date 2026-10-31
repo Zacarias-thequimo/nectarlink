@@ -191,16 +191,37 @@ pub(crate) async fn start_host(shared: &Arc<Shared>) -> Result<PairingUri> {
 /// Most addresses a pairing link carries; more only make the QR code denser.
 const MAX_LINK_ADDRS: usize = 3;
 
-/// Picks the addresses worth putting in a pairing link: private IPv4 first
-/// (what a phone on the same network almost always uses), then other IPv4,
-/// then at most one IPv6. Link-local IPv6 is useless without a scope ID.
-/// Discovery on the network finds the device even if none of these work.
-fn link_addrs(mut addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
-    let rank = |a: &SocketAddr| match a.ip() {
-        IpAddr::V4(v4) if v4.is_private() => 0,
-        IpAddr::V4(v4) if v4.is_loopback() || v4.is_link_local() => 3,
-        IpAddr::V4(_) => 1,
-        IpAddr::V6(_) => 2,
+/// The address this machine would use to reach the outside world, found by
+/// "connecting" a UDP socket (no packet is sent) and reading back the local
+/// address the kernel picked. That is the interface with the default route,
+/// which is the one a device on the same network can reach: a PC with Docker,
+/// VPNs or several NICs has a pile of private addresses and only this one is
+/// on the network the phone is on.
+fn default_route_ip() -> Option<IpAddr> {
+    // TEST-NET-1: unroutable by design, so nothing is ever sent.
+    let probe = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    probe.connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    let ip = probe.local_addr().ok()?.ip();
+    (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
+}
+
+/// Picks the addresses worth putting in a pairing link: the default-route
+/// address first (the only one a phone on this network can usually reach),
+/// then other private IPv4, then other IPv4, then at most one IPv6.
+/// Link-local IPv6 is useless without a scope ID. Discovery on the network
+/// finds the device even if none of these work.
+fn link_addrs(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    link_addrs_with(addrs, default_route_ip())
+}
+
+fn link_addrs_with(mut addrs: Vec<SocketAddr>, preferred: Option<IpAddr>) -> Vec<SocketAddr> {
+    let preferred = preferred.map(|ip| ip.to_canonical());
+    let rank = |a: &SocketAddr| match a.ip().to_canonical() {
+        ip if Some(ip) == preferred => 0,
+        IpAddr::V4(v4) if v4.is_private() => 1,
+        IpAddr::V4(v4) if v4.is_loopback() || v4.is_link_local() => 4,
+        IpAddr::V4(_) => 2,
+        IpAddr::V6(_) => 3,
     };
     let has_non_loopback = addrs.iter().any(|a| match a.ip() {
         IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unicast_link_local(),
@@ -542,25 +563,49 @@ fn fail(shared: &Shared, err: Error) -> Error {
 mod tests {
     use super::*;
 
+    fn parse(addrs: &[&str]) -> Vec<SocketAddr> {
+        addrs.iter().map(|a| a.parse().unwrap()).collect()
+    }
+
+    fn picked(addrs: &[&str], preferred: Option<IpAddr>) -> Vec<String> {
+        link_addrs_with(parse(addrs), preferred).iter().map(ToString::to_string).collect()
+    }
+
     #[test]
     fn pairing_links_carry_the_useful_addresses() {
-        let addrs: Vec<SocketAddr> = [
+        let addrs = [
             "[2001:db8:1::1]:5000",
             "[fe80::1]:5000",
             "100.64.0.1:5000",
             "[2001:db8:1::2]:5000",
             "192.168.1.20:5000",
             "127.0.0.1:5000",
-        ]
-        .iter()
-        .map(|a| a.parse().unwrap())
-        .collect();
-        let picked: Vec<String> = link_addrs(addrs).iter().map(ToString::to_string).collect();
-        assert_eq!(picked, ["192.168.1.20:5000", "100.64.0.1:5000", "[2001:db8:1::1]:5000"]);
-        let loopback_only: Vec<SocketAddr> = ["127.0.0.1:5000".parse().unwrap()].into();
-        let fallback: Vec<String> = link_addrs(loopback_only).iter().map(ToString::to_string).collect();
-        assert_eq!(fallback, ["127.0.0.1:5000"]);
-        assert!(link_addrs(Vec::new()).is_empty());
+        ];
+        assert_eq!(picked(&addrs, None), ["192.168.1.20:5000", "100.64.0.1:5000", "[2001:db8:1::1]:5000"]);
+        assert_eq!(picked(&["127.0.0.1:5000"], None), ["127.0.0.1:5000"]);
+        assert!(picked(&[], None).is_empty());
+    }
+
+    #[test]
+    fn the_default_route_address_comes_first() {
+        // A PC with Docker and a VPN up: the phone is on the hotspot's
+        // 192.168.43.0/24, and every one of these is private.
+        let addrs =
+            ["172.17.0.1:5000", "172.18.0.1:5000", "172.20.0.1:5000", "10.8.0.2:5000", "192.168.43.12:5000"];
+        let preferred = Some("192.168.43.12".parse().unwrap());
+        let got = picked(&addrs, preferred);
+        assert_eq!(got[0], "192.168.43.12:5000", "the reachable address must be in the link");
+        assert_eq!(got.len(), MAX_LINK_ADDRS, "and the link still stays small");
+        // Without it, the three docker bridges would fill the link and the
+        // phone would have nothing to dial.
+        assert!(!picked(&addrs, None).contains(&"192.168.43.12:5000".to_string()));
+    }
+
+    #[test]
+    fn a_preferred_address_that_is_not_ours_changes_nothing() {
+        let addrs = ["172.17.0.1:5000", "192.168.1.20:5000"];
+        let elsewhere = Some("192.168.43.12".parse().unwrap());
+        assert_eq!(picked(&addrs, elsewhere), picked(&addrs, None));
     }
 
     #[test]

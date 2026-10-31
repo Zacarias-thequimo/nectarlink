@@ -137,6 +137,26 @@ Item {
                 text: qsTr("Pair nearby instead")
                 onClicked: panel.showNearby = true
             }
+            // The camera can't read a code when the phone is the hotspot and
+            // can't scan its own screen; the link can be sent to the phone.
+            Button {
+                anchors.horizontalCenter: parent.horizontalCenter
+                variant: "outline"
+                size: "sm"
+                iconPath: Icons.clipboard
+                visible: panel.state_ === "hosting"
+                text: qsTr("Copy the link")
+                onClicked: AppController.copyText(Pairing.link())
+            }
+            Txt {
+                width: parent.width
+                role: "caption"
+                muted: true
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WrapAnywhere
+                visible: panel.state_ === "hosting"
+                text: qsTr("Can't scan? Copy the link and paste it on your phone under “Paste a link instead”.")
+            }
         }
 
         // ---- Compact horizontal QR layout (used in Walkthrough Step 4) ----
