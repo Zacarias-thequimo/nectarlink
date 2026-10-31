@@ -167,6 +167,32 @@ QTEOF
 
 bundle_private_qt_if_needed
 
+# The libraries the binary needs from the system, read from its own NEEDED
+# entries. A Qt program pulls in more than the list below names (glib, pcre2,
+# zlib, ...), and an install with --no-install-recommends gets only what
+# Depends says, so the list has to be complete. Libraries that resolve outside
+# /usr (a bundled Qt) belong to no package and are skipped.
+BASE_DEPENDS="libc6, libgcc-s1, libstdc++6, libgl1, libegl1, libx11-6, libxcb1, libxkbcommon0, libwayland-client0, libfontconfig1, libfreetype6, libdbus-1-3"
+system_depends() {
+    local libs path pkg
+    libs="$(ldd "${PKG_ROOT}/usr/lib/nectarlink/nectarlink-desktop" 2>/dev/null \
+        | awk '/=> \// {print $3}')" || return 0
+    for path in ${libs}; do
+        # dpkg knows the merged /usr path, ldd reports /lib.
+        pkg="$(dpkg -S "$(readlink -f "${path}")" 2>/dev/null \
+            | grep -v '^diversion' | head -n 1 | cut -d: -f1)" || continue
+        [ -n "${pkg}" ] && printf '%s\n' "${pkg}"
+    done | sort -u | awk -v base="${BASE_DEPENDS}" '
+        BEGIN { n = split(base, a, /, */); for (i = 1; i <= n; i++) seen[a[i]] = 1 }
+        !seen[$0] { out = out (out == "" ? "" : ", ") $0 }
+        END { print out }'
+}
+
+SYSTEM_DEPENDS="$(system_depends)"
+if [ -n "${SYSTEM_DEPENDS}" ]; then
+    SYSTEM_DEPENDS=", ${SYSTEM_DEPENDS}"
+fi
+
 INSTALLED_SIZE="$(du -sk "${PKG_ROOT}/usr" | awk '{print $1}')"
 
 cat > "${PKG_ROOT}/DEBIAN/control" <<EOF
@@ -176,7 +202,7 @@ Section: net
 Priority: optional
 Architecture: ${DEB_ARCH}
 Installed-Size: ${INSTALLED_SIZE}
-Depends: libc6, libgcc-s1, libstdc++6, libgl1, libegl1, libx11-6, libxcb1, libxkbcommon0, libwayland-client0, libfontconfig1, libfreetype6, libdbus-1-3${QT_DEPENDS}
+Depends: ${BASE_DEPENDS}${SYSTEM_DEPENDS}${QT_DEPENDS}
 Recommends: fuse3, curl | wget, ffmpeg, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-base, libopenh264-8 | libopenh264-7 | libopenh264-6 | libavcodec62 | libavcodec61 | libavcodec60, pipewire-bin | pulseaudio-utils, pipewire, wl-clipboard, xclip, xdg-utils, avahi-daemon, bluez, v4l2loopback-dkms, policykit-1 | pkexec
 Maintainer: thtbee <https://github.com/thtbee/nectarlink>
 Homepage: https://github.com/thtbee/nectarlink
